@@ -5,11 +5,13 @@ import argparse
 import os
 import sys
 
-def init_cmd(args):
+def get_bucket_name():
     bucket = os.environ.get('G3_BUCKET', None)
     if not bucket:
         raise ValueError('please set $G3_BUCKET')
+    return bucket
 
+def parent_git_repo():
     cur_dir = os.getcwd()
     repo_path = cur_dir
     top_level = False
@@ -19,15 +21,25 @@ def init_cmd(args):
     if not top_level:
         raise ValueError('this is not a directory tracked in git, giving up')
 
-    if subprocess.run(['git', 'diff', '--cached', '--quiet']).returncode:
-        raise ValueError('something is in the staging area, bailing out')
-
     _, repo_name = os.path.split(repo_path)
     # TODO: check name of remote matches repo_name
 
     relpath = os.path.relpath(cur_dir, repo_path)
     if relpath == '.':
         relpath == ''
+
+    return repo_path, repo_name, relpath
+
+def rclone_push(bucket, repo_name, relpath):
+    subprocess.run(['rclone', 'sync', '--progress', '--checksum',
+                    '--exclude={.gitignore,.g3}', '.', f's3:{bucket}/{repo_name}/{relpath}'], check=True)
+
+def init_cmd(args):
+    bucket = get_bucket_name()
+    repo_path, repo_name, relpath = parent_git_repo()
+
+    if subprocess.run(['git', 'diff', '--cached', '--quiet']).returncode:
+        raise ValueError('something is in the staging area, bailing out')
 
     with open('.g3', 'x'):
         # Create empty file
@@ -38,20 +50,21 @@ def init_cmd(args):
                  '!.gitignore\n' +
                  '!.g3\n')
 
-    subprocess.run(['rclone', 'sync', '--progress', '--checksum',
-                    '--exclude={.gitignore,.g3}', '.', f's3:{bucket}/{repo_name}/{relpath}'])
+    rclone_push(bucket, repo_name, relpath)
 
     subprocess.run(['git', 'add', '.g3', '.gitignore'], check=True)
     subprocess.run(['git', 'commit', '-m', f'Add .g3 at /{relpath}/\n'], check=True)
 
     print("\nCommit created! Now `git push'!")
 
-    #with tempfile.NamedTemporaryFile(mode='w') as fp:
-    #    fp.write(f'Add .g3 at /{relpath}/\n')
-    #    fp.flush()
-    #    os.fsync(fp.fileno())
+def push_cmd(args):
+    bucket = get_bucket_name()
 
-    #    subprocess.run(['git', 'commit', '--allow-empty-message', f'--template={fp.name}'], check=True)
+    if not os.path.isfile('.g3'):
+        raise ValueError('this is not a directory tracked with g3, giving up')
+
+    repo_path, repo_name, relpath = parent_git_repo()
+    rclone_push(bucket, repo_name, relpath)
 
 def main(argv):
     parser = argparse.ArgumentParser(prog='g3')
@@ -59,6 +72,9 @@ def main(argv):
 
     init_parser = subparsers.add_parser('init', help='start syncing this directory with g3')
     init_parser.set_defaults(func=init_cmd)
+
+    push_parser = subparsers.add_parser('push', help='push to s3')
+    push_parser.set_defaults(func=push_cmd)
 
     args = parser.parse_args(argv)
     args.func(args)
